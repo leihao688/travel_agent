@@ -1,76 +1,84 @@
-<template>
-  <div :class="['message-item', message.role]">
-    <el-avatar
-      :icon="message.role === 'user' ? User : ChatDotRound"
-      :size="40"
-      class="avatar"
-    />
-    <div class="message-content">
-      <div class="message-text">{{ message.content }}</div>
-      <div class="message-time">{{ formatTime(message.timestamp) }}</div>
-    </div>
-  </div>
-</template>
-
 <script setup>
-import { User, ChatDotRound } from '@element-plus/icons-vue'
+import { computed } from 'vue'
+import MarkdownIt from 'markdown-it'
 
-defineProps({
+const props = defineProps({
   message: {
     type: Object,
     required: true
   }
 })
 
-const formatTime = (timestamp) => {
-  if (!timestamp) return ''
-  return new Date(timestamp).toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
+const md = new MarkdownIt()
+
+const renderedContent = computed(() => {
+  if (props.message.role === 'assistant') {
+    return md.render(props.message.content)
+  }
+  return props.message.content
+})
 </script>
+
+<template>
+  <div class="message-item" :class="message.role">
+    <div class="avatar">
+      {{ message.role === 'user' ? '👤' : '' }}
+    </div>
+    <div class="content">
+      <!-- 使用 v-html 渲染解析后的 Markdown -->
+      <div v-if="message.role === 'assistant'" v-html="renderedContent"></div>
+      <div v-else>{{ message.content }}</div>
+    </div>
+  </div>
+</template>
 
 <style scoped>
 .message-item {
   display: flex;
   gap: 12px;
-  margin-bottom: 24px;
-  animation: fadeIn 0.3s ease;
+  margin-bottom: 20px;
+  padding: 10px;
 }
 
 .message-item.user {
   flex-direction: row-reverse;
 }
 
-.message-content {
-  max-width: 75%;
-  background: #f5f7fa;
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: #e4e7ed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+
+.content {
+  max-width: 80%;
   padding: 12px 16px;
   border-radius: 12px;
-  position: relative;
-}
-
-.message-item.user .message-content {
-  background: #ecf5ff;
-  color: #409eff;
-}
-
-.message-text {
   line-height: 1.6;
-  word-wrap: break-word;
-  white-space: pre-wrap;
+  font-size: 15px;
 }
 
-.message-time {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 6px;
-  text-align: right;
+.message-item.user .content {
+  background-color: #409eff;
+  color: white;
+  border-top-right-radius: 2px;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+.message-item.assistant .content {
+  background-color: #f5f7fa;
+  color: #303133;
+  border-top-left-radius: 2px;
 }
+
+/* 添加一些 Markdown 渲染后的基础样式 */
+:deep(h3) { margin: 16px 0 8px; font-size: 1.2em; }
+:deep(h4) { margin: 12px 0 6px; font-size: 1.1em; }
+:deep(p) { margin: 8px 0; }
+:deep(ul) { padding-left: 20px; }
+:deep(strong) { font-weight: bold; }
 </style>

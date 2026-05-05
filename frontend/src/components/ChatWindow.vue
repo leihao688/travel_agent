@@ -57,6 +57,7 @@
           type="textarea"
           :rows="1"
           placeholder="有问题，尽管问"
+          @keydown.enter.exact="sendMessage"
           @keydown.ctrl.enter="sendMessage"
           resize="none"
           class="modern-input"
@@ -87,10 +88,11 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import {ref, nextTick, watch, onMounted, onUnmounted, computed} from 'vue'
 import { useChatStore } from '@/stores/chat'
-import { sendChatMessage } from '@/api/travel'
+import {sendChatMessage, streamChatMessage} from '@/api/travel'
 import MessageItem from './MessageItem.vue'
+// 🔥 核心修改：使用 computed 保持与 Store 同步
 import { ElMessage } from 'element-plus'
 import {
   Loading,
@@ -105,7 +107,8 @@ import {
 } from '@element-plus/icons-vue'
 
 const chatStore = useChatStore()
-const messages = ref(chatStore.messages)
+
+const messages = computed(() => chatStore.messages)
 const inputValue = ref('')
 const isLoading = ref(false)
 const messagesRef = ref(null)
@@ -143,6 +146,7 @@ onUnmounted(() => {
   document.removeEventListener('keydown', handleKeyDown)
 })
 
+
 const sendMessage = async () => {
   if (!inputValue.value.trim() || isLoading.value) return
 
@@ -151,24 +155,39 @@ const sendMessage = async () => {
   inputValue.value = ''
   isLoading.value = true
 
+  // 🔥 核心修改：添加空消息并直接获取 Store 中的最新引用
+  const assistantMsgIndex = chatStore.messages.length
+  chatStore.addMessage('assistant', '')
+
   try {
     scrollToBottom()
-    const response = await sendChatMessage({
+
+    // 使用流式请求
+    await streamChatMessage({
       query: userMessage,
       session_id: chatStore.sessionId,
       user_id: 'default_user'
+    }, (chunk) => {
+      // 🔥 核心修改：直接操作 Store 里的对象，确保 Vue 响应式能捕获变化
+      // 注意：由于 chunk 可能包含换行符或前缀，这里做一个简单的清洗
+      const cleanChunk = chunk.replace(/^data: /, '').replace(/\n$/, '')
+      if (cleanChunk && cleanChunk !== '[DONE]') {
+          chatStore.messages[assistantMsgIndex].content += cleanChunk
+      }
+      scrollToBottom()
     })
 
-    const content = response?.data?.data?.content || response?.content || "AI 返回了空内容"
-    chatStore.addMessage('assistant', content)
   } catch (error) {
-    ElMessage.error('发送消息失败，请检查后端服务是否启动')
+    ElMessage.error('发送消息失败')
     console.error(error)
+    if (chatStore.messages[assistantMsgIndex]) {
+        chatStore.messages[assistantMsgIndex].content = "抱歉，回答生成失败。"
+    }
   } finally {
     isLoading.value = false
-    scrollToBottom()
   }
 }
+
 
 const scrollToBottom = async () => {
   await nextTick()

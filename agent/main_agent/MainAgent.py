@@ -100,7 +100,8 @@ class MainAgent:
         return result
 
     async def _tool_search_attractions(self, city: str, days: str) -> str:
-        return await _collect_output(self.attraction_agent, f"推荐{city}{days}天行程的景点")
+        query = f"{city}最知名的 {days * 2} 个景点和 1 个商场"
+        return await _collect_output(self.attraction_agent, query)
 
     async def _tool_recommend_hotels(self, city: str, budget: str = "中等") -> str:
         return await _collect_output(self.hotel_agent, f"推荐{city}酒店，预算{budget}")
