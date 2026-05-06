@@ -14,7 +14,7 @@ from agent.son_agent.PlanAgent import PlanPlanAgent
 from agent.son_agent.SelfReviewAgent import SelfReviewAgent, ContentGuardrailAgent
 from agent.son_agent.WeatherQueryAgent import WeatherQueryAgent
 from agent.tools.middleware import monitor_tool_call, log_before_model, current_agent_name
-from models.factor import chat_model
+from models.factor import chat_model, create_chat_model
 from models.schema import WeatherQuerySchema, AttractionSearchSchema, HotelRecommendSchema, RoutePlanSchema, \
     LogicReviewSchema, ContentGuardSchema
 
@@ -47,7 +47,7 @@ class MainAgent:
         self.formatter_agent = FormatterAgent()
         self.self_review_agent = SelfReviewAgent()
         self.content_guardrail_agent = ContentGuardrailAgent()
-
+        self._planning_data = None  # 🔥 新增：缓存规划数据
         self.long_term_memory = LongTermMemory()
         self.session_memory = SessionMemory()
         # 🔥 从配置项读取重试次数
@@ -138,6 +138,10 @@ class MainAgent:
             weather_data = weather
             attractions_data = attractions
             hotels_data = hotels
+        self._planning_data = {
+            "attractions": attractions_data if isinstance(attractions_data, list) else [],
+            "hotels": hotels_data if isinstance(hotels_data, list) else []
+        }
 
         # 🔥 构造结构化 JSON 传递给 PlanAgent
         context = json.dumps({
@@ -173,7 +177,7 @@ class MainAgent:
             """
             tools = await self._get_tools()
             agent = create_agent(
-                model=chat_model,
+                model=create_chat_model(),
                 tools=tools,
                 system_prompt=system_prompt,
                 middleware=[monitor_tool_call, log_before_model]
@@ -217,6 +221,16 @@ class MainAgent:
             #             else:
             #                 log.info("[MainAgent] LLM 判定为非 JSON 内容，直接输出")
             #                 yield final_content
+
+            # 🔥 从缓存中提取景点名称并追加到文本末尾
+            try:
+                if self._planning_data and isinstance(self._planning_data.get("attractions"), list):
+                    names = [a.get("name") for a in self._planning_data["attractions"] if a.get("name")]
+                    if names:
+                        # 使用隐藏注释标签，不影响 Markdown 渲染，但前端可提取
+                        final_content += f"\n\n<!--IMAGE_TAGS:{json.dumps(names, ensure_ascii=False)}-->"
+            except Exception as e:
+                log.warning(f"提取景点标签失败: {e}")
             log.info("[MainAgent] 开始流式输出最终内容")
 
             chunk_size = 50
@@ -233,8 +247,15 @@ class MainAgent:
                 await self.long_term_memory.store_summary(user_id, all_messages)
 
 
+
         except Exception as e:
             log.error(f"主流程全局异常: {e}")
+            # 🔥 新增：异常时也保存用户输入到 Redis（至少保留用户记录）
+            try:
+                self.session_memory.add_message(session_id, "user", query)
+                self.session_memory.add_message(session_id, "assistant", f"❌ 系统异常：{str(e)}")
+            except:
+                pass
             try:
                 response = await chat_model.ainvoke(
                     f"系统遇到了一点小故障（{str(e)}）。请用幽默自然的语气向用户解释，并尝试根据'{query}'提供一些通用建议。"

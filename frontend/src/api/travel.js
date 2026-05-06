@@ -12,6 +12,15 @@ export function sendChatMessage(data) {
     data
   })
 }
+
+
+export function searchImages(data) {
+  return request({
+    url: '/images/search',
+    method: 'post',
+    data
+  })
+}
 // 🔥 新增：流式请求方法
 export async function streamChatMessage(data, onChunk) {
   // ... 前面的 fetch 逻辑不变 ...

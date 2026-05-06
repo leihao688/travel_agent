@@ -7,7 +7,7 @@ from langchain.agents import create_agent
 from agent.tools.mcp_client import mcp_tool_manager
 # 确保从 middleware 导入 context 变量
 from agent.tools.middleware import monitor_tool_call, log_before_model, current_agent_name
-from models.factor import chat_model
+from models.factor import chat_model, create_chat_model
 from utils.prompt_load import weather_prompts_load
 
 """
@@ -31,7 +31,7 @@ class WeatherQueryAgent:
 
             tools = await mcp_tool_manager.get_tools()
             agent = create_agent(
-                model=chat_model,
+                model=create_chat_model(),
                 tools=tools,
                 system_prompt=weather_prompts_load(),
                 middleware=[monitor_tool_call, log_before_model]

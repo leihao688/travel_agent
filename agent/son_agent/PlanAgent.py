@@ -3,7 +3,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import ToolMessage
 from agent.tools.mcp_client import mcp_tool_manager
 from agent.tools.middleware import monitor_tool_call, log_before_model, current_agent_name
-from models.factor import chat_model
+from models.factor import chat_model, create_chat_model
 from utils.prompt_load import route_prompts_load
 from typing import Generator, AsyncGenerator
 import asyncio
@@ -28,7 +28,7 @@ class PlanPlanAgent:
                     if t.name in allowed_tool_names
                 ]
                 self.agent = create_agent(
-                    model=chat_model,
+                    model=create_chat_model(),
                     tools=allowed_tools,
                     system_prompt=route_prompts_load(),
                     middleware=[monitor_tool_call, log_before_model]

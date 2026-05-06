@@ -11,8 +11,6 @@ router = APIRouter(prefix="/api", tags=["AI对话服务"])
 log = get_logger(__name__)
 
 
-
-
 def get_main_agent():
     """获取 MainAgent 实例（每次请求创建新实例）"""
     return MainAgent()
@@ -121,6 +119,7 @@ async def chat_stream(request: ChatRequest, _: bool = Depends(verify_api_key)):
     import asyncio
     # 🔥 修改：为每个请求创建独立的 MainAgent 实例
     main_agent = get_main_agent()
+
     async def event_generator():
         try:
             async for chunk in main_agent.get_stream(
@@ -162,6 +161,43 @@ async def chat_stream(request: ChatRequest, _: bool = Depends(verify_api_key)):
             "Access-Control-Allow-Origin": "*"
         }
     )
+
+
+@router.post("/images/search")
+async def search_images(request: ImageRequest):
+    """图片搜索接口（供前端直接调用）"""
+    if not settings.unsplash_access_key:
+        log.error("[图片搜索] Unsplash API Key 未配置")
+        return {"code": 500, "message": "图片服务未配置", "data": None}
+
+    url = "https://api.unsplash.com/search/photos"
+    params = {
+        "query": request.query,
+        "client_id": settings.unsplash_access_key,
+        "count": min(request.count, 10),
+        "orientation": "landscape"
+    }
+
+    try:
+        log.info(f"[图片搜索] 查询: {request.query}, 数量: {request.count}")
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            results = [{
+                "url": item.get("urls", {}).get("regular"),
+                "alt": item.get("alt_description", ""),
+                "author": item.get("user", {}).get("name")
+            } for item in data.get("results", [])]
+
+            log.info(f"[图片搜索] 成功获取 {len(results)} 张图片")
+            return {"code": 200, "message": "success", "data": results}
+        else:
+            log.error(f"[图片搜索] API 请求失败: {response.status_code}")
+            return {"code": 500, "message": f"图片服务请求失败: {response.status_code}", "data": None}
+    except Exception as e:
+        log.error(f"[图片搜索] 异常: {str(e)}", exc_info=True)
+        return {"code": 500, "message": f"图片搜索异常: {str(e)}", "data": None}
 
 
 class BatchChatRequest(BaseModel):
