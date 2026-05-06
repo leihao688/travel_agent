@@ -7,27 +7,27 @@ from agent.tools.middleware import monitor_tool_call, log_before_model, current_
 from models.factor import chat_model
 
 from utils.prompt_load import hotel_prompts_load
-from typing import Generator,AsyncGenerator
+from typing import Generator, AsyncGenerator
 import asyncio
 
 
 class HotelAgent:
     def __init__(self):
-        self.agent = None
+        pass
 
     async def get_stream(self, query: str) -> AsyncGenerator[str, None]:
         token = current_agent_name.set("HotelAgent")
         try:
-            if self.agent is None:
-                tools = await mcp_tool_manager.get_tools()
-                self.agent = create_agent(
-                    model=chat_model,
-                    tools=tools,
-                    system_prompt=hotel_prompts_load(),
-                    middleware=[monitor_tool_call, log_before_model]
-                )
+
+            tools = await mcp_tool_manager.get_tools()
+            agent = create_agent(
+                model=chat_model,
+                tools=tools,
+                system_prompt=hotel_prompts_load(),
+                middleware=[monitor_tool_call, log_before_model]
+            )
             # 使用 messages 模式流式输出
-            async for chunk, metadata in self.agent.astream(
+            async for chunk, metadata in agent.astream(
                     {"messages": [{"role": "user", "content": query}]},
                     stream_mode="messages",
                     config={"recursion_limit": 15}  # 【新增】限制最大执行步数，防止死循环

@@ -2,14 +2,21 @@ from fastapi import APIRouter, Header, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
-
+import requests
 from agent.main_agent.MainAgent import MainAgent
 from utils.logger_tool import get_logger
+from config import settings
 
 router = APIRouter(prefix="/api", tags=["AI对话服务"])
 log = get_logger(__name__)
 
-main_agent = MainAgent()
+
+
+
+def get_main_agent():
+    """获取 MainAgent 实例（每次请求创建新实例）"""
+    return MainAgent()
+
 
 # API Key 验证（从环境变量读取）
 API_KEY = os.getenv("AI_SERVICE_API_KEY", "your-secret-key")
@@ -17,7 +24,7 @@ API_KEY = os.getenv("AI_SERVICE_API_KEY", "your-secret-key")
 
 def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
     """验证 API Key"""
-    #if x_api_key != API_KEY:
+    # if x_api_key != API_KEY:
     #    log.warning(f"[API认证] 无效的 API Key: {x_api_key[:10]}...")
     #    raise HTTPException(status_code=401, detail="无效的 API Key")
     return True
@@ -29,6 +36,12 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default", description="会话ID（由 Java 生成）")
     user_id: str = Field(default="default", description="用户ID")
     enable_stream: bool = Field(default=False, description="是否启用流式输出")
+
+
+class ImageRequest(BaseModel):
+    """图片搜索请求模型"""
+    query: str = Field(..., description="搜索关键词")
+    count: int = Field(default=1, description="图片数量")
 
 
 class MessageItem(BaseModel):
@@ -58,6 +71,8 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_api_key)):
         "user_id": "user_456"
     }
     """
+    # 🔥 修改：为每个请求创建独立的 MainAgent 实例
+    main_agent = get_main_agent()
     try:
         log.info(f"[Chat API] Java调用: user_id={request.user_id}, session_id={request.session_id}")
         log.info(f"[Chat API] 用户问题: {request.query}")
@@ -104,7 +119,8 @@ async def chat_stream(request: ChatRequest, _: bool = Depends(verify_api_key)):
     from fastapi.responses import StreamingResponse
     import json
     import asyncio
-
+    # 🔥 修改：为每个请求创建独立的 MainAgent 实例
+    main_agent = get_main_agent()
     async def event_generator():
         try:
             async for chunk in main_agent.get_stream(
@@ -124,7 +140,10 @@ async def chat_stream(request: ChatRequest, _: bool = Depends(verify_api_key)):
                 "data": {"content": "", "done": True, "session_id": request.session_id}
             }, ensure_ascii=False)
             yield f"data: {done_data}\n\n"
-
+        except asyncio.CancelledError:
+            # 🔥 新增：处理客户端断开连接的情况
+            log.warning(f"[Chat Stream] 客户端断开连接: session_id={request.session_id}")
+            raise
         except Exception as e:
             log.error(f"[Chat Stream] 异常: {str(e)}")
             error_data = json.dumps({
@@ -159,6 +178,7 @@ async def batch_chat(request: BatchChatRequest, _: bool = Header(verify_api_key)
 
     适用于 Java 需要传递完整对话上下文的场景
     """
+    main_agent = get_main_agent()
     try:
         # 将消息列表转换为 query
         last_user_message = next(

@@ -21,22 +21,22 @@ class WeatherQueryAgent:
 
     # 由于 __init__ 方法不能是 async 的，我们将工具的加载和 Agent 的创建推迟到 get_stream 执行时（懒加载）。
     def __init__(self):
-        self.agent = None
+        pass
 
     async def get_stream(self, query: str) -> AsyncGenerator[str, None]:
         """异步流式调用"""
         token = current_agent_name.set("WeatherQueryAgent")
         try:
             # weather_agent_prompt.txt. 异步等待工具加载（仅在第一次执行时连接 MCP Server）
-            if self.agent is None:
-                tools = await mcp_tool_manager.get_tools()
-                self.agent = create_agent(
-                    model=chat_model,
-                    tools=tools,
-                    system_prompt=weather_prompts_load(),
-                    middleware=[monitor_tool_call, log_before_model]
-                )
-            async for chunk, metadata in self.agent.astream(
+
+            tools = await mcp_tool_manager.get_tools()
+            agent = create_agent(
+                model=chat_model,
+                tools=tools,
+                system_prompt=weather_prompts_load(),
+                middleware=[monitor_tool_call, log_before_model]
+            )
+            async for chunk, metadata in agent.astream(
                     {"messages": [{"role": "user", "content": query}]},
                     stream_mode="messages",
                     config={"recursion_limit": 15}

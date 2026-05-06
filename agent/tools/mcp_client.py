@@ -19,18 +19,22 @@ class MCPToolManager:
 
     _instance = None
     _tools = None
+    _loading_lock = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._loading_lock = asyncio.Lock()
         return cls._instance
 
     async def get_tools(self) -> List[BaseTool]:
         """获取 MCP 工具列表（懒加载）"""
-        if self._tools is None:
-            # 🔥 必须加 await，否则存入的是协程对象
-            self._tools = await self._load_tools()
-        return self._tools
+        # 🔥 添加锁，防止并发加载
+        async with self._loading_lock:
+            if self._tools is None:
+                # 🔥 必须加 await，否则存入的是协程对象
+                self._tools = await self._load_tools()
+            return self._tools
 
     @staticmethod
     async def _load_tools() -> List[BaseTool]:

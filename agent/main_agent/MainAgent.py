@@ -47,7 +47,7 @@ class MainAgent:
         self.formatter_agent = FormatterAgent()
         self.self_review_agent = SelfReviewAgent()
         self.content_guardrail_agent = ContentGuardrailAgent()
-        self.agent = None
+
         self.long_term_memory = LongTermMemory()
         self.session_memory = SessionMemory()
         # 🔥 从配置项读取重试次数
@@ -80,7 +80,7 @@ class MainAgent:
                 args_schema=RoutePlanSchema,
                 coroutine=self._tool_plan_route
             ),
-            # 🔥 新增：注册逻辑评审和内容护栏为工具
+
             StructuredTool(
                 name="logic_review",
                 description="首先先对用户的问题进行逻辑性检查，对行程方案进行逻辑自检，检查可行性、合理性。content: 待评审的行程内容",
@@ -164,22 +164,21 @@ class MainAgent:
             long_term_mem = self.long_term_memory.retrieve(user_id, session_id)
             # 🔥 4. 动态注入 System Prompt（加入长期记忆）
 
-            if not self.agent:
-                base_prompt = main_prompts_load()
-                system_prompt = f"""{base_prompt}
+            base_prompt = main_prompts_load()
+            system_prompt = f"""{base_prompt}
     
-                ### 🧠 用户长期记忆（跨会话）
-                以下信息是该用户的历史偏好，请在规划行程时**严格参考**：
-                {long_term_mem if long_term_mem else "无历史记忆"}
-                """
-                tools = await self._get_tools()
-                self.agent = create_agent(
-                    model=chat_model,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    middleware=[monitor_tool_call, log_before_model]
-                )
-            #  2. 加载历史记忆
+            ### 🧠 用户长期记忆（跨会话）
+            以下信息是该用户的历史偏好，请在规划行程时**严格参考**：
+            {long_term_mem if long_term_mem else "无历史记忆"}
+            """
+            tools = await self._get_tools()
+            agent = create_agent(
+                model=chat_model,
+                tools=tools,
+                system_prompt=system_prompt,
+                middleware=[monitor_tool_call, log_before_model]
+            )
+
             history_data = self.session_memory.get_history(session_id)
             initial_messages = []
             for item in history_data:
@@ -189,7 +188,7 @@ class MainAgent:
                     initial_messages.append(AIMessage(content=item["content"]))
             #  3. 执行 Agent（将历史 + 当前 Query 传入）
             current_messages = initial_messages + [HumanMessage(content=query)]
-            result = await self.agent.ainvoke({"messages": current_messages})
+            result = await agent.ainvoke({"messages": current_messages})
             raw_output = result.get("output", "")
             if not raw_output and result.get("messages"):
                 raw_output = result["messages"][-1].content
@@ -220,14 +219,10 @@ class MainAgent:
             #                 yield final_content
             log.info("[MainAgent] 开始流式输出最终内容")
 
-            messages = [
-                {"role": "system", "content": "你是一个旅行助手，请直接输出以下内容，不要添加任何开场白或结束语："},
-                {"role": "user", "content": final_content}
-            ]
-
-            async for chunk in chat_model.astream(messages):
-                if hasattr(chunk, "content") and chunk.content:
-                    yield chunk.content
+            chunk_size = 50
+            for i in range(0, len(final_content), chunk_size):
+                yield final_content[i: i + chunk_size]
+                await asyncio.sleep(0.02)  # 模拟打字机效果
 
             # 🔥 9. 触发长期记忆存储（当会话达到一定长度时）
             if len(history_data) >= 4:

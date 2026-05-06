@@ -160,22 +160,19 @@ const sendMessage = async () => {
   chatStore.addMessage('assistant', '')
 
   try {
-    scrollToBottom()
-
+    await scrollToBottom()
     // 使用流式请求
     await streamChatMessage({
       query: userMessage,
       session_id: chatStore.sessionId,
       user_id: 'default_user'
     }, (chunk) => {
-      // 🔥 核心修改：直接操作 Store 里的对象，确保 Vue 响应式能捕获变化
-      // 注意：由于 chunk 可能包含换行符或前缀，这里做一个简单的清洗
-      const cleanChunk = chunk.replace(/^data: /, '').replace(/\n$/, '')
-      if (cleanChunk && cleanChunk !== '[DONE]') {
-          chatStore.messages[assistantMsgIndex].content += cleanChunk
-      }
+      // 🔥 简化：直接追加内容，不需要再次清洗
+      chatStore.messages[assistantMsgIndex].content += chunk
       scrollToBottom()
     })
+
+
 
   } catch (error) {
     ElMessage.error('发送消息失败')

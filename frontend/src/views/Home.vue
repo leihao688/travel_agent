@@ -3,7 +3,10 @@
     <!-- 左侧边栏 -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <div class="logo">🌍 小旅</div>
+        <div class="logo">
+         <img src="/logo.png" alt="Logo" class="logo-img" />
+          <span>小旅</span>
+        </div>
         <el-button @click="createNewChat" type="primary" size="small" class="new-chat-btn">
           <el-icon><Plus /></el-icon> 新对话
         </el-button>
@@ -115,7 +118,16 @@ const deleteChat = (id) => {
   font-size: 18px;
   font-weight: bold;
   margin-bottom: 12px;
+  /* 🔥 增加 Flex 布局让图片和文字对齐 */
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+.logo-img {
+  height: 32px; /* 🔥 调整图片高度以适配侧边栏 */
+  width: auto;
+}
+
 
 .new-chat-btn {
   width: 100%;

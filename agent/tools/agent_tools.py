@@ -15,6 +15,7 @@ from agent.tools.rate_limter import rate_limiter
 from rag.Rag_service import RagService
 from utils.logger_tool import get_logger
 import random
+from config import settings
 
 load_dotenv()
 log = get_logger(__name__)
@@ -39,7 +40,7 @@ async def rag_check(query: str) -> str:
     description="查询指定城市的天气信息。city: 城市名，date: 日期（今天/明天/昨天/后天 或 YYYY-MM-DD）")
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10),
        retry=retry_if_exception_type(httpx.HTTPError))
-async def query_weather( city: str, date: str = None) -> str:
+async def query_weather(city: str, date: str = None) -> str:
     """异步天气查询（带限流+重试）"""
     # 🔥 限流保护：和风天气 QPS 限制
     await rate_limiter.acquire("qweather")
@@ -292,3 +293,68 @@ async def get_route_info(origin: str, destination: str, mode: str = "transit") -
         return f"路线查询失败：{data.get('info', '未知错误')}"
     except Exception as e:
         return f"路线查询出错：{str(e)}"
+
+
+# @mcp.tool(description="搜索旅行相关的风景图片。当用户需要查看某个景点、城市或地区的实景照片时使用此工具。"
+#                       "参数：query-搜索关键词（如'三亚海滩'、'桂林山水'），count-返回图片数量（默认3张，最多10张）。返回包含图片URL、描述和作者信息的列表。")
+# @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10),
+#        retry=retry_if_exception_type(httpx.HTTPError))
+# def search_travel_images(query: str, count: int = 3):
+#     """
+#     旅行图片搜索工具
+#
+#     Args:
+#         query: 搜索关键词（如：三亚海滩、桂林山水）
+#         count: 返回图片数量
+#
+#     Returns:
+#         包含图片信息的字典
+#     """
+#     if not settings.unsplash_access_key:
+#         return {
+#             "success": False,
+#             "error": "Unsplash API Key 未配置",
+#             "images": []
+#         }
+#
+#     url = "https://api.unsplash.com/search/photos"
+#     params = {
+#         "query": query,
+#         "client_id": settings.unsplash_access_key,
+#         "count": min(count, 10),  # 限制最大数量
+#         "orientation": "landscape"
+#     }
+#
+#     try:
+#         log.info(f"[图片搜索] 查询: {query}, 数量: {count}")
+#         response = requests.get(url, params=params, timeout=10)
+#
+#         if response.status_code == 200:
+#             data = response.json()
+#             results = [{
+#                 "url": item.get("urls", {}).get("regular"),
+#                 "alt": item.get("alt_description", ""),
+#                 "author": item.get("user", {}).get("name"),
+#                 "thumbnail": item.get("urls", {}).get("small")
+#             } for item in data.get("results", [])]
+#
+#             log.info(f"[图片搜索] 成功获取 {len(results)} 张图片")
+#             return {
+#                 "success": True,
+#                 "images": results,
+#                 "total": len(results)
+#             }
+#         else:
+#             log.error(f"[图片搜索] API 请求失败: {response.status_code}")
+#             return {
+#                 "success": False,
+#                 "error": f"API 请求失败: {response.status_code}",
+#                 "images": []
+#             }
+#     except Exception as e:
+#         log.error(f"[图片搜索] 异常: {str(e)}")
+#         return {
+#             "success": False,
+#             "error": str(e),
+#             "images": []
+#         }
