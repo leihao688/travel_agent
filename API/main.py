@@ -1,11 +1,21 @@
+import sys
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
+
 from starlette.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-
+from utils.logger_tool import get_logger
 from API import chat, health
+from agent.skills.skill_initializer import initialize_skills
 from config import Settings, print_config, validate_config
 from fastapi import FastAPI
+from API.ragTest import router as rag_test_router
 
 settings = Settings()
+
+log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -53,6 +63,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(chat.router)
 app.include_router(health.router)
+app.include_router(rag_test_router)
 
 
 @app.get("/")
@@ -62,6 +73,12 @@ async def root():
         "status": "running",
         "docs": "/docs"
     }
+
+
+@app.on_event("startup")
+async def startup_event():
+    await initialize_skills()
+    log.info("[Startup] Skills 初始化完成")
 
 
 if __name__ == "__main__":

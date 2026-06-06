@@ -1,15 +1,24 @@
+import sys
+import os
+
+# 添加项目根目录到 sys.path，解决模块导入问题
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
+
+import json
 import os.path
 import numpy as np
 from langchain_chroma import Chroma
-from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_core.documents import Document
 from models.factor import embedding_model
 from utils.config_load import chorma_config, rag_config
 from utils.file_handle import listdir_with_allowed_type, get_file_md5_hex, file_loader
 from utils.logger_tool import LogConfig
 from utils.path_handle import get_absolute_path_with_base, get_project_root
+from rag.MarkdownSmartSplitter import MarkdownSmartSplitter
+from rag.RRFeRanker import RRFRanker
 import re
 import os
 from sklearn.cluster import AgglomerativeClustering
@@ -26,71 +35,88 @@ class VectorStore:
             embedding_function=self.embedding_model,
             persist_directory=get_absolute_path_with_base(get_project_root(), chorma_config["persist_directory"])
         )
-        # 混合分块的粗切，按标题进行分割
-        headers_to_split_on = [
-            ("#", "Header_1"),
-            ("##", "Header_2"),
-            ("###", "Header_3"),
-        ]
-        self.markdown_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=headers_to_split_on
+
+        # 使用新的 MarkdownSmartSplitter
+        self.markdown_splitter = MarkdownSmartSplitter(
+            max_parent_length=chorma_config.get("max_parent_length", 500),
+            chunk_size=chorma_config.get("chunk_size", 500),
+            chunk_overlap=chorma_config.get("chunk_overlap", 50)
         )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chorma_config["chunk_size"],
-            chunk_overlap=chorma_config["chunk_overlap"],
-            separators=chorma_config["separators"],
-            length_function=len
-        )
+
+        # 保留原有的 text_splitter 用于非 Markdown 文件
+        self.text_splitter = None
+
         self.md5_file_path = get_absolute_path_with_base(
             get_project_root(), chorma_config["md5_hex_store"]
         )
 
-    # 新增：BM25 检索器
-    # 注意：需要先 add_documents 后才能初始化 BM25Retriever
-    # 这里先留空，在 get_retriever 中动态创建
+        # 初始化 RRF 重排序器
+        self.rrf_ranker = RRFRanker(k=60)
+
+    def _is_noise_chunk(self, meta: dict) -> bool:
+        """检查是否为噪声章节（仅检查 Header_2，避免 H1 误杀整个文档的 chunk）"""
+        noise_headers = rag_config.get("noise_headers", ["附录"])
+        header_val = meta.get('Header_2', '')
+        if header_val and any(nh in header_val for nh in noise_headers):
+            return True
+        return False
 
     def get_retriever(self):
-        # weather_agent_prompt.txt. 获取 ChromaDB 中的所有文档
+        """获取混合检索器（BM25 + 向量 + RRF 融合）"""
         docs = self.vector_store.get()
         if not docs['documents']:
             return self.vector_store.as_retriever()
 
-        # 2. 将数据库内容转为 Document 对象列表
         from langchain_core.documents import Document
+        import jieba
+
+        # BM25 使用 jieba 分词 + 小写化，解决中文无空格和英文大小写问题
+        def chinese_tokenizer(text: str):
+            return list(jieba.cut(text.lower()))
 
         documents = []
         for content, meta in zip(docs['documents'], docs['metadatas']):
-            # 🔥 关键：从 metadata 提取所有层级标题并拼接到内容
-            header_parts = []
-            # 按层级顺序拼接：Header_1 > Header_2 > Header_3
-            for level in ['Header_1', 'Header_2', 'Header_3']:
-                if level in meta:
-                    header_parts.append(meta[level])
+            if self._is_noise_chunk(meta):
+                continue
+            documents.append(Document(page_content=content, metadata=meta))
 
-            # 如果有标题，拼接到内容前面
-            if header_parts:
-                enhanced_content = " ".join(header_parts) + " " + content
-            else:
-                enhanced_content = content
-
-            documents.append(Document(page_content=enhanced_content, metadata=meta))
-
-        # 3. 创建 BM25 检索器
-        bm25_retriever = BM25Retriever.from_documents(documents)
+        bm25_retriever = BM25Retriever.from_documents(
+            documents,
+            preprocess_func=chinese_tokenizer
+        )
         bm25_retriever.k = rag_config["k"]
 
-        # 4. 创建向量检索器
+        # 向量检索：大幅多取，避免关键词查询时相关结果被遗漏
+        overfetch_k = max(rag_config["k"] * 10, 30)
         vector_retriever = self.vector_store.as_retriever(
-            search_kwargs={"k": rag_config["k"]}
+            search_kwargs={"k": overfetch_k}
         )
 
-        # 5. 融合：BM25 权重 0.4，向量权重 0.6
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever],
-            weights=[0.4, 0.6]
-        )
+        rrf_k = rag_config.get("rrf_k", 60)
+        self.rrf_ranker = RRFRanker(k=rrf_k)
 
-        return ensemble_retriever
+        bm25_weight = rag_config.get("bm25_weight", 1.0)
+        vector_weight = rag_config.get("vector_weight", 1.0)
+        is_noise = self._is_noise_chunk
+
+        class RRFRetriever:
+            def __init__(self, bm25, vector, rrf_ranker, top_k):
+                self.bm25 = bm25
+                self.vector = vector
+                self.rrf_ranker = rrf_ranker
+                self.top_k = top_k
+
+            def invoke(self, query: str):
+                docs = self.rrf_ranker.rerank(
+                    query=query,
+                    retrievers=[self.bm25, self.vector],
+                    top_k=self.top_k * 2,
+                    weights=[bm25_weight, vector_weight]
+                )
+                filtered = [d for d in docs if not is_noise(d.metadata)]
+                return filtered[:self.top_k]
+
+        return RRFRetriever(bm25_retriever, vector_retriever, self.rrf_ranker, rag_config["k"])
 
     def load_file(self, dirfile: str):
         allow_path_file: tuple[str] = listdir_with_allowed_type(
@@ -115,9 +141,9 @@ class VectorStore:
                 for doc in documents:
                     if file_path.endswith(".txt"):
                         all_splits = self._process_txt(doc, file_path)
-                    if file_path.endswith(".pdf"):
+                    elif file_path.endswith(".pdf"):
                         all_splits = self._process_pdf(doc, file_path)
-                    if file_path.endswith(".md"):
+                    elif file_path.endswith(".md"):
                         all_splits = self._process_md(doc, file_path)
 
                 if not all_splits:
@@ -156,37 +182,48 @@ class VectorStore:
     def _process_txt(self, doc: Document, file_path: str) -> list[Document]:
         all_splits = []
         """处理TXT文件（结构化解析，提取章节标题+正文，提升检索精度）"""
-        # 步骤1：尝试按中文序号分割
         sections = re.split(r'\n(?=[一二三四五六七八九十百]+、)', doc.page_content)
-        # 🔥 兜底检测：如果只分出1块或第1块没有序号，说明不是结构化txt
         is_structured = (
                 len(sections) > 1 and
                 re.match(r'[一二三四五六七八九十百]+、', sections[0])
         )
 
         if not is_structured:
-            generic_docs = self.text_splitter.create_documents(
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chorma_config["chunk_size"],
+                chunk_overlap=chorma_config["chunk_overlap"],
+                separators=chorma_config["separators"],
+                length_function=len
+            )
+            generic_docs = text_splitter.create_documents(
                 [doc.page_content],
                 metadatas=[{'source': os.path.basename(file_path)}]
             )
             all_splits.extend(generic_docs)
+            return all_splits
+
         for section in sections:
             if not section.strip():
                 continue
 
-            # 2. 提取章节标题
             title_match = re.match(r'([一二三四五六七八九十百]+、[^\n]+)', section)
             section_title = title_match.group(1) if title_match else "旅行攻略"
 
-            # 3. 提取正文
             body_start = section.find('\n')
             body_content = section[body_start + 1:].strip() if body_start != -1 else section.strip()
 
-            # 4. 超过大小则按标点分块
             if not body_content:
                 continue
-                # 使用中文分块器处理正文
-            chapter_docs = self.text_splitter.create_documents(
+
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chorma_config["chunk_size"],
+                chunk_overlap=chorma_config["chunk_overlap"],
+                separators=chorma_config["separators"],
+                length_function=len
+            )
+            chapter_docs = text_splitter.create_documents(
                 [body_content],
                 metadatas=[{
                     'section_title': section_title,
@@ -194,43 +231,43 @@ class VectorStore:
                 }]
             )
 
-            # 将标题拼接到每个分块的内容前
             for chapter_doc in chapter_docs:
                 chapter_doc.page_content = f"{section_title}\n{chapter_doc.page_content}"
 
             all_splits.extend(chapter_docs)
-            # 步骤3：语义主题聚类
-        # self.get_topic(all_splits)
         return all_splits
 
     def get_topic(self, all_splits):
         if len(all_splits) > 1:
             logger.info(f"开始语义聚类，共{len(all_splits)}个分块...")
-            # weather_agent_prompt.txt. 将每个文本分块转化为高维向量
             embeds = []
             for i, d in enumerate(all_splits):
                 embeds.append(self.embedding_model.embed_query(d.page_content))
                 if (i + 1) % 5 == 0:
                     logger.info(f"已生成 {i + 1}/{len(all_splits)} 个向量...")
 
-            # 2.将向量转化为Numpy数组以便后续的聚类算法使用
             embeds_array = np.array(embeds)
 
-            # 3.根据向量相似度自动分组，相似内容归为一类
             clustering = AgglomerativeClustering(
                 n_clusters=None, distance_threshold=0.6, linkage="average"
             )
             labels = clustering.fit_predict(embeds_array)
 
-            # 4. 在 metadata 中增加主题标签
             for doc_obj, label in zip(all_splits, labels):
                 doc_obj.metadata['theme_label'] = f"主题_{label}"
 
             logger.info(f"聚类完成，共{len(set(labels))}个主题")
 
     def _process_pdf(self, doc: Document, file_path: str) -> list[Document]:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chorma_config["chunk_size"],
+            chunk_overlap=chorma_config["chunk_overlap"],
+            separators=chorma_config["separators"],
+            length_function=len
+        )
         all_splits = []
-        pdf_docs = self.text_splitter.create_documents(
+        pdf_docs = text_splitter.create_documents(
             [doc.page_content],
             metadatas=[{'source': os.path.basename(file_path)}]
         )
@@ -239,34 +276,62 @@ class VectorStore:
         return all_splits
 
     def _process_md(self, doc: Document, file_path: str) -> list[Document]:
+        """处理Markdown文件 - 使用父子分块策略"""
         all_splits = []
-        markdown_splits = self.markdown_splitter.split_text(doc.page_content)
-        for split in markdown_splits:
-            # 从 metadata 提取所有层级标题并拼接到内容
-            header_parts = []
-            for level in ['Header_1', 'Header_2', 'Header_3']:
-                if level in split.metadata:
-                    header_parts.append(split.metadata[level])
 
-            if header_parts:
-                enhanced_content = " ".join(header_parts) + "\n" + split.page_content
-            else:
-                enhanced_content = split.page_content
-            md_docs = self.text_splitter.create_documents(
-                [enhanced_content],
-                metadatas=[{'source': os.path.basename(file_path)}]
+        try:
+            # 使用 MarkdownSmartSplitter 进行分割
+            parent_chunks, child_chunks = self.markdown_splitter.split_text(
+                doc.page_content,
+                source=os.path.basename(file_path)
             )
-            all_splits.extend(md_docs)
-        self.get_topic(all_splits)
-        return all_splits
 
+            logger.info(f"Markdown 文件分割: {len(parent_chunks)} 个父块, {len(child_chunks)} 个子块")
 
-if __name__ == '__main__':
-    data_path = get_absolute_path_with_base(get_project_root(), chorma_config["data_path"])
+            # 将父块存储到 MySQL
+            from rag.ParentChunkStore import ParentChunkStore
+            from utils.file_handle import get_file_md5_hex
 
-    print("正在加载数据...")
-    vector_store = VectorStore()
-    vector_store.load_file(data_path)
-    retrieve = vector_store.get_retriever()
-    res = retrieve.invoke("南京的城市编码是什么")
-    print(res)
+            parent_store = ParentChunkStore()
+            parent_data_list = []
+
+            for parent in parent_chunks:
+                # 统计该父块的子块数量
+                parent_chunk_id = parent.metadata.get('parent_chunk_id', '')
+                child_count = len([
+                    c for c in child_chunks
+                    if c.metadata.get('parent_chunk_id') == parent_chunk_id
+                ])
+
+                parent_data_list.append({
+                    'chunk_id': parent_chunk_id,
+                    'file_path': file_path,
+                    'file_name': os.path.basename(file_path),
+                    'file_md5': get_file_md5_hex(file_path),
+                    'header_1': parent.metadata.get('Header_1', ''),
+                    'header_2': parent.metadata.get('Header_2', ''),
+                    'header_3': parent.metadata.get('Header_3', ''),
+                    'full_content': parent.page_content,
+                    'content_length': len(parent.page_content),
+                    'child_count': child_count,
+                    'metadata_json': json.dumps({
+                        k: v for k, v in parent.metadata.items()
+                        if k not in ['Header_1', 'Header_2', 'Header_3', 'parent_chunk_id']
+                    }, ensure_ascii=False),
+                    'chunk_index': int(parent.metadata.get('chunk_index', 0)),
+                    'chroma_collection': chorma_config["collection_name"]
+                })
+
+            # 批量保存父块
+            if parent_data_list:
+                parent_store.batch_add_parent_chunks(parent_data_list)
+                logger.info(f"父块已存储到 MySQL: {len(parent_data_list)} 条")
+
+            # 只将子块添加到向量库
+            all_splits.extend(child_chunks)
+
+            return all_splits
+
+        except Exception as e:
+            logger.error(f"Markdown 处理失败: {str(e)}")
+            raise e

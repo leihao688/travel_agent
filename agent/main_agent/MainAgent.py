@@ -7,6 +7,9 @@ import json
 
 from agent.memory.LongTermMemory import LongTermMemory
 from agent.memory.SessionMemory import SessionMemory
+from agent.skills.skill_initializer import initialize_skills
+from agent.skills.skill_initializer import skill_registry
+from agent.skills.skill_intent import intent_classifier
 from agent.son_agent.AttarctionAgent import AttractionAgent
 from agent.son_agent.FormatterAgent import FormatterAgent
 from agent.son_agent.HotelAgent import HotelAgent
@@ -14,6 +17,7 @@ from agent.son_agent.PlanAgent import PlanPlanAgent
 from agent.son_agent.SelfReviewAgent import SelfReviewAgent, ContentGuardrailAgent
 from agent.son_agent.WeatherQueryAgent import WeatherQueryAgent
 from agent.tools.middleware import monitor_tool_call, log_before_model, current_agent_name
+from agent.tools.mcp_client import mcp_tool_manager
 from models.factor import chat_model, create_chat_model
 from models.schema import WeatherQuerySchema, AttractionSearchSchema, HotelRecommendSchema, RoutePlanSchema, \
     LogicReviewSchema, ContentGuardSchema
@@ -47,11 +51,15 @@ class MainAgent:
         self.formatter_agent = FormatterAgent()
         self.self_review_agent = SelfReviewAgent()
         self.content_guardrail_agent = ContentGuardrailAgent()
-        self._planning_data = None  # 🔥 新增：缓存规划数据
+        self._planning_data = None
         self.long_term_memory = LongTermMemory()
         self.session_memory = SessionMemory()
         # 🔥 从配置项读取重试次数
         self.rag_service = RagService()
+        # 🔥 初始化 Skills（只在第一次实例化时执行）
+        if not hasattr(MainAgent, '_skills_initialized'):
+            asyncio.create_task(initialize_skills())
+            MainAgent._skills_initialized = True
 
     async def _get_tools(self):
         return [
@@ -95,9 +103,13 @@ class MainAgent:
         ]
 
     async def _tool_query_weather(self, city: str, date: str = None) -> str:
-        result = await _collect_output(self.weather_agent, f"{city} {date or ''}的天气情况")
-        log.info(f"[MainAgent._tool_query_weather] 返回结果: {result[:200] if result else '空'}...")
-        return result
+        try:
+            result = await _collect_output(self.weather_agent, f"{city} {date or ''}的天气情况")
+            log.info(f"[MainAgent._tool_query_weather] 返回结果: {result[:200] if result else '空'}...")
+            return result
+        except Exception as e:
+            log.error(f"[MainAgent._tool_query_weather] 天气查询失败: {type(e).__name__}: {str(e)}")
+            return f"天气查询失败: {str(e)}"
 
     async def _tool_search_attractions(self, city: str, days: str) -> str:
         query = f"{city}最知名的 {days * 2} 个景点和 1 个商场"
@@ -161,21 +173,64 @@ class MainAgent:
 
     # 通用逻辑自省评审（无硬编码、全自动识别所有逻辑问题）
 
-    async def get_stream(self, query: str, session_id: str = "default", user_id: str = "default"):
+    async def get_stream(self, query: str, session_id: str = "default", user_id: str = "default", user_profile=None):
         token = current_agent_name.set("MainAgent")
         try:
-            # 3. 检索长期记忆
-            long_term_mem = self.long_term_memory.retrieve(user_id, session_id)
-            # 🔥 4. 动态注入 System Prompt（加入长期记忆）
+            # 构建用户画像提示
+            profile_text = ""
+            if user_profile:
+                if isinstance(user_profile, dict):
+                    nickname = user_profile.get('nickname', '') or ''
+                    level = user_profile.get('level', 1) or 1
+                    bio = user_profile.get('bio', '') or ''
+                else:
+                    nickname = (user_profile.nickname or '') if user_profile.nickname else ''
+                    level = user_profile.level if user_profile.level else 1
+                    bio = (user_profile.bio or '') if user_profile.bio else ''
+                profile_text = f"用户名: {nickname}, 等级: {level}, 简介: {bio}"
 
-            base_prompt = main_prompts_load()
-            system_prompt = f"""{base_prompt}
-    
+            # 3. 检索长期记忆
+            long_term_mem = self.long_term_memory.retrieve(user_id)
+            if long_term_mem:
+                log.info(f"[MainAgent] 加载用户画像: {long_term_mem[:100]}...")
+            # 🔥 Skill 路由：检查是否匹配某个 Skill
+            matched_skill = await skill_registry.smart_match_skill(query, intent_classifier)
+
+            if matched_skill:
+                log.info(f"[MainAgent] 匹配到 Skill: {matched_skill.name}")
+                system_prompt = f"""{matched_skill.prompt}
+
+            ### 👤 当前用户信息
+            {profile_text if profile_text else "未登录用户"}
+
             ### 🧠 用户长期记忆（跨会话）
+            以下信息是该用户的历史偏好，请在回答时**参考**：
+            {long_term_mem if long_term_mem else "无历史记忆"}
+            """
+                # 🔥 plan Skill 需要混合内部子 Agent 工具 + MCP 工具
+                if matched_skill.name == "plan":
+                    internal_tools = await self._get_tools()
+                    tools = internal_tools + matched_skill.tools
+                    log.info(f"[MainAgent] plan Skill 加载工具: 内部 {len(internal_tools)} + MCP {len(matched_skill.tools)} = {len(tools)}")
+                else:
+                    tools = matched_skill.tools
+            else:
+                log.info("[MainAgent] 未匹配特定 Skill，使用完整规划流程")
+                base_prompt = main_prompts_load()
+                system_prompt = f"""{base_prompt}
+
+            ###  当前用户信息
+            {profile_text if profile_text else "未登录用户"}
+
+            ###  用户长期记忆（跨会话）
             以下信息是该用户的历史偏好，请在规划行程时**严格参考**：
             {long_term_mem if long_term_mem else "无历史记忆"}
             """
-            tools = await self._get_tools()
+                # 🔥 混合使用内部工具 + MCP 工具
+                internal_tools = await self._get_tools()
+                mcp_tools = await mcp_tool_manager.get_tools()
+                tools = internal_tools + mcp_tools
+                log.info(f"[MainAgent] 加载工具: 内部 {len(internal_tools)} + MCP {len(mcp_tools)} = {len(tools)}")
             agent = create_agent(
                 model=create_chat_model(),
                 tools=tools,
@@ -190,12 +245,56 @@ class MainAgent:
                     initial_messages.append(HumanMessage(content=item["content"]))
                 elif item["role"] == "assistant":
                     initial_messages.append(AIMessage(content=item["content"]))
-            #  3. 执行 Agent（将历史 + 当前 Query 传入）
+                    #  3. 执行 Agent（将历史 + 当前 Query 传入）
             current_messages = initial_messages + [HumanMessage(content=query)]
-            result = await agent.ainvoke({"messages": current_messages})
-            raw_output = result.get("output", "")
-            if not raw_output and result.get("messages"):
-                raw_output = result["messages"][-1].content
+            # 🔥 真正的流式输出：使用 astream 替代 ainvoke
+            from langchain_core.messages import ToolMessage, AIMessageChunk
+            full_output = ""
+            try:
+                async for chunk_or_message, metadata in agent.astream(
+                        {"messages": current_messages},
+                        stream_mode="messages"
+                ):
+                    # 过滤掉工具调用过程消息，不让用户看到中间状态
+                    if isinstance(chunk_or_message, ToolMessage):
+                        continue
+
+                    # 只处理 AIMessageChunk（LLM 生成的内容）
+                    if isinstance(chunk_or_message, AIMessageChunk):
+                        content = chunk_or_message.content
+
+                        # 跳过带有 tool_calls 的消息（这些是 LLM 决定调用工具的中间消息）
+                        if hasattr(chunk_or_message, 'tool_calls') and chunk_or_message.tool_calls:
+                            continue
+
+                        #  过滤掉 Agent 的思考过程/推理文本
+                        if isinstance(content, str) and content:
+                            # 检测是否包含推理过程关键词
+                            reasoning_keywords = [
+                                "让我先", "首先让我", "我需要", "我应该", "看来我",
+                                "现在我将", "首先，让我们", "接下来，请告诉我",
+                                "现在，我们需要", "我将调用", "现在我将通过",
+                                "在此之前，我已经", "现在，我将通过",
+                                "不用担心，我会", "不过不用担心"
+                            ]
+                            if any(keyword in content for keyword in reasoning_keywords):
+                                continue
+
+                            full_output += content
+                            yield content  # 🔥 真正的 token 级流式输出
+
+            except Exception as stream_error:
+                import traceback
+                log.error(f"[MainAgent] 流式输出异常: {stream_error}")
+                log.error(f"[MainAgent] 异常堆栈:\n{traceback.format_exc()}")  # 🔥 新增：打印详细堆栈
+                if not full_output:
+                    full_output = f"抱歉，生成回复时出现异常：{str(stream_error)}"
+
+                    # 🔥 流式输出完成后，进行后续处理
+            raw_output = full_output
+
+            if not raw_output:
+                raw_output = "抱歉，我未能生成有效的回复。"
                 # 🔥 4. 存入短期记忆
             self.session_memory.add_message(session_id, "user", query)
             self.session_memory.add_message(session_id, "assistant", raw_output)
@@ -223,20 +322,24 @@ class MainAgent:
             #                 yield final_content
 
             # 🔥 从缓存中提取景点名称并追加到文本末尾
-            try:
-                if self._planning_data and isinstance(self._planning_data.get("attractions"), list):
-                    names = [a.get("name") for a in self._planning_data["attractions"] if a.get("name")]
-                    if names:
-                        # 使用隐藏注释标签，不影响 Markdown 渲染，但前端可提取
-                        final_content += f"\n\n<!--IMAGE_TAGS:{json.dumps(names, ensure_ascii=False)}-->"
-            except Exception as e:
-                log.warning(f"提取景点标签失败: {e}")
+            if not matched_skill or matched_skill.name == "plan":
+                try:
+                    if self._planning_data and isinstance(self._planning_data.get("attractions"), list):
+                        names = [a.get("name") for a in self._planning_data["attractions"] if a.get("name")]
+                        if names:
+                            # 使用隐藏注释标签，不影响 Markdown 渲染，但前端可提取
+                            final_content += f"\n\n<!--IMAGE_TAGS:{json.dumps(names, ensure_ascii=False)}-->"
+                except Exception as e:
+                    log.warning(f"提取景点标签失败: {e}")
             log.info("[MainAgent] 开始流式输出最终内容")
 
-            chunk_size = 50
-            for i in range(0, len(final_content), chunk_size):
-                yield final_content[i: i + chunk_size]
-                await asyncio.sleep(0.02)  # 模拟打字机效果
+            # 🔥 如果还有额外内容需要追加，继续流式输出
+            if final_content != raw_output:
+                extra_content = final_content[len(raw_output):]
+                chunk_size = 50
+                for i in range(0, len(extra_content), chunk_size):
+                    yield extra_content[i: i + chunk_size]
+                    await asyncio.sleep(0.02)
 
             # 🔥 9. 触发长期记忆存储（当会话达到一定长度时）
             if len(history_data) >= 4:

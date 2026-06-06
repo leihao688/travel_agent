@@ -28,6 +28,37 @@ mcp = FastMCP(name="travel_agent")
 
 
 @mcp.tool(
+    description="对行程方案进行逻辑自检，检查可行性、合理性。content: 待评审的行程内容，user_query: 用户原始需求")
+async def logic_review(content: str, user_query: str = "") -> str:
+    """逻辑评审工具"""
+    from models.factor import chat_model
+
+    review_prompt = f"""
+你是旅行安全与逻辑专家。请基于【用户原始需求】对【行程方案】进行深度逻辑压力测试。
+
+【用户原始需求】：{user_query if user_query else '未提供'}
+【待评审方案】：
+{content}
+
+### 审查核心（必须严格检查）：
+1. 【天数对齐】：方案覆盖的天数是否严格等于用户需求？（如用户说玩2天，必须有Day1和Day2）
+2. 【地点对齐】：是否围绕用户指定的城市展开？
+3. 【可行性】：时间线、交通动线是否在物理世界中行得通？
+
+### 输出格式（严格三行）：
+第一行：合格 / 不合格
+第二行：若不合格，简述核心冲突（例如：用户要求2天，方案只有1天）；若合格，填无
+第三行：若不合格给出修正建议，否则填无需修正
+"""
+    try:
+        res = await chat_model.ainvoke(review_prompt)
+        return res.content.strip()
+    except Exception as e:
+        log.error(f"[logic_review] 评审失败: {e}")
+        return "合格\n无\n无需修正"
+
+
+@mcp.tool(
     description="检查知识库中是否包含与查询相关的信息。query: 用户查询内容")
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10),
        retry=retry_if_exception_type(httpx.HTTPError))
@@ -48,15 +79,39 @@ async def query_weather(city: str, date: str = None) -> str:
         return "错误：未配置和风天气API Key"
     import re
     try:
-        # 尝试从 RAG 获取城市编码
-        rag_result = await rag_tool.aget_summary(f"{city}城市编码")
-        # 提取 9 位数字编码
-        match = re.search(r'\d{9}', rag_result)
-        if match:
-            location_id = match.group(0)
+        # 尝试从向量库获取城市编码
+        log.info(f"[query_weather] 开始查询 {city} 的城市天气编码")
+        
+        from rag.Vector_Store import VectorStore
+        vector_store = VectorStore()
+        
+        # 策略：直接遍历所有天气编码文档进行精确匹配（更可靠）
+        all_docs = vector_store.vector_store.get()
+        documents = all_docs['documents']
+        metadatas = all_docs['metadatas']
+        
+        location_id = None
+        
+        # 遍历所有文档，查找天气编码知识库中城市名匹配的文档
+        for i, meta in enumerate(metadatas):
+            source = meta.get('source', '')
+            if '天气编码' in source:
+                header_3 = meta.get('Header_3', '')
+                # 精确匹配城市名称
+                if header_3 == city:
+                    match = re.search(r'\d{9}', documents[i])
+                    if match:
+                        location_id = match.group(0)
+                        log.info(f"[query_weather] 精确匹配到城市 {city} 的编码: {location_id}")
+                        break
+        
+        if location_id:
+            pass
         else:
+            log.warning(f"[query_weather] 未能从向量库中找到{city}的城市编码")
             return f"错误：无法从知识库获取{city}的城市编码，请检查 RAG 数据。"
     except Exception as e:
+        log.error(f"[query_weather] 获取城市编码时发生异常: {type(e).__name__}: {str(e)}")
         return f"获取城市编码失败：{str(e)}"
 
     headers = {"X-QW-Api-Key": QWEATHER_API_KEY}
@@ -104,7 +159,9 @@ async def query_weather(city: str, date: str = None) -> str:
                         "temp": f"{day['tempMin']}~{day['tempMax']}",
                         "wind": f"{day['windDirDay']}{day['windScaleDay']}级"
                     }]
-                    return json.dumps(weather_data, ensure_ascii=False)
+                    result = json.dumps(weather_data, ensure_ascii=False)
+                    log.info(f"[query_weather] 返回天气数据: {result}")
+                    return result
             return f"未找到{city}{date_str}的天气预报数据"
 
         else:
@@ -117,7 +174,9 @@ async def query_weather(city: str, date: str = None) -> str:
                 "temp": now['temp'],
                 "wind": f"{now['windDir']}风{now['windScale']}级"
             }]
-            return json.dumps(weather_data, ensure_ascii=False)
+            result = json.dumps(weather_data, ensure_ascii=False)
+            log.info(f"[query_weather] 返回天气数据: {result}")
+            return result
     except Exception as e:
         log.error(f"天气查询出错：{str(e)}")
         return f"天气查询异常"
@@ -134,7 +193,14 @@ async def search_map_poi(keywords: str, city: str, category: str = "attraction")
     if not AMAP_KEY:
         return "错误：未配置高德地图 API Key"
 
-    type_code = "110000" if category == "attraction" else "150000"
+        # 🔥 修复：使用正确的高德 POI 类型代码
+    type_code_map = {
+        "attraction": "110000",  # 风景名胜
+        "hotel": "120201",  # 宾馆酒店
+        "restaurant": "050100",  # 中餐厅
+        "shopping": "060100"  # 购物场所
+    }
+    type_code = type_code_map.get(category.lower(), "110000")
 
     url = "https://restapi.amap.com/v3/place/text"
     params = {
@@ -165,7 +231,10 @@ async def search_map_poi(keywords: str, city: str, category: str = "attraction")
                 if category == "hotel" and 'biz_ext' in poi and 'cost' in poi['biz_ext']:
                     info["price"] = f"{poi['biz_ext']['cost']}元"
                 results.append(info)
-            return json.dumps(results, ensure_ascii=False)
+            if results:
+                return json.dumps(results, ensure_ascii=False)
+            else:
+                return f"未找到相关{'景点' if category == 'attraction' else '酒店'}"
 
         return f"未找到相关{'景点' if category == 'attraction' else '酒店'}"
     except Exception as e:
@@ -243,12 +312,16 @@ async def get_route_info(origin: str, destination: str, mode: str = "transit") -
     # 全部统一用 V5 接口，公交不需要 city 参数
     url = f"https://restapi.amap.com/v5/direction/{api_mode}"
     if api_mode == "transit/integrated":
+        # 🔥 动态获取起点和终点的城市编码
+        city1_adcode = await _get_city_adcode_from_coordinate(origin)
+        city2_adcode = await _get_city_adcode_from_coordinate(destination)
+
         params = {
             "key": AMAP_KEY,
             "origin": origin,
             "destination": destination,
-            "city1": "110000",  # 必须是城市编码，不是中文名
-            "city2": "110000",  # 必须是城市编码
+            "city1": city1_adcode,  # 动态获取起点城市编码
+            "city2": city2_adcode,  # 动态获取终点城市编码
             "show_fields": "cost"
 
         }
@@ -260,7 +333,7 @@ async def get_route_info(origin: str, destination: str, mode: str = "transit") -
             resp.raise_for_status()
             data = resp.json()
 
-        if data.get("status") == "weather_agent_prompt.txt" and data.get("info") == "OK":
+        if data.get("status") == "1" and data.get("info") == "OK":
             route = data.get("route", {})
 
             if api_mode == "transit/integrated":
@@ -295,6 +368,68 @@ async def get_route_info(origin: str, destination: str, mode: str = "transit") -
         return f"路线查询出错：{str(e)}"
 
 
+async def _get_city_adcode_from_coordinate(coordinate: str) -> str:
+    """
+    通过坐标获取城市编码(adcode)
+    :param coordinate: 坐标字符串，格式为"经度,纬度"
+    :return: 城市编码(adcode)，失败返回默认值"110000"(北京)
+    """
+    AMAP_KEY = os.getenv("AMAP_API_KEY")
+    if not AMAP_KEY:
+        return "110000"
+
+    try:
+        # 使用高德逆地理编码API
+        url = "https://restapi.amap.com/v3/geocode/regeo"
+        params = {
+            "key": AMAP_KEY,
+            "location": coordinate,
+            "output": "json"
+        }
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params=params, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("status") == "1" and data.get("regeocode"):
+            address_component = data["regeocode"].get("addressComponent", {})
+            adcode = address_component.get("adcode", "110000")
+            return adcode
+
+        return "110000"
+    except Exception as e:
+        log.warning(f"获取城市编码失败: {str(e)}，使用默认值")
+        return "110000"
+
+
+@mcp.tool(
+    description="对通过逻辑评审的方案进行最后的轻量化修正，优化语言表达和格式。content: 已通过逻辑评审的行程内容")
+async def content_guardrail(content: str) -> str:
+    """内容护栏工具"""
+    from models.factor import chat_model
+
+    guardrail_prompt = f"""
+你是旅行内容编辑专家。请对以下行程方案进行轻量化修正，优化语言表达和格式。
+
+【待修正方案】：
+{content}
+
+### 修正要求：
+1. 保持原方案的核心内容和结构不变
+2. 优化语言表达，使其更加流畅自然
+3. 统一格式，确保排版整洁
+4. 修正明显的语法错误或表述不当
+5. **不要添加新内容，不要删除重要信息**
+
+直接输出修正后的完整方案。
+"""
+    try:
+        res = await chat_model.ainvoke(guardrail_prompt)
+        return res.content.strip()
+    except Exception as e:
+        log.error(f"[content_guardrail] 修正失败: {e}")
+        return content
 # @mcp.tool(description="搜索旅行相关的风景图片。当用户需要查看某个景点、城市或地区的实景照片时使用此工具。"
 #                       "参数：query-搜索关键词（如'三亚海滩'、'桂林山水'），count-返回图片数量（默认3张，最多10张）。返回包含图片URL、描述和作者信息的列表。")
 # @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10),

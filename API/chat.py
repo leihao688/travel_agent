@@ -28,12 +28,20 @@ def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
     return True
 
 
+class UserProfile(BaseModel):
+    """用户画像（由 Java 注入）"""
+    nickname: str = Field(default="", description="用户昵称")
+    level: int = Field(default=1, description="用户等级 1-5")
+    bio: str = Field(default="", description="个人简介")
+
+
 class ChatRequest(BaseModel):
     """对话请求（Java 调用）"""
     query: str = Field(..., description="用户问题", min_length=1, max_length=2000)
     session_id: str = Field(default="default", description="会话ID（由 Java 生成）")
     user_id: str = Field(default="default", description="用户ID")
     enable_stream: bool = Field(default=False, description="是否启用流式输出")
+    user_profile: Optional[UserProfile] = Field(default=None, description="用户画像（由 Java 注入）")
 
 
 class ImageRequest(BaseModel):
@@ -80,7 +88,8 @@ async def chat(request: ChatRequest, _: bool = Depends(verify_api_key)):
         async for chunk in main_agent.get_stream(
                 query=request.query,
                 session_id=request.session_id,
-                user_id=request.user_id
+                user_id=request.user_id,
+                user_profile=request.user_profile
         ):
             full_response += chunk
 
@@ -125,7 +134,8 @@ async def chat_stream(request: ChatRequest, _: bool = Depends(verify_api_key)):
             async for chunk in main_agent.get_stream(
                     query=request.query,
                     session_id=request.session_id,
-                    user_id=request.user_id
+                    user_id=request.user_id,
+                    user_profile=request.user_profile
             ):
                 data = json.dumps({
                     "code": 200,
@@ -233,7 +243,8 @@ async def batch_chat(request: BatchChatRequest, _: bool = Header(verify_api_key)
         async for chunk in main_agent.get_stream(
                 query=last_user_message,
                 session_id=request.session_id,
-                user_id=request.user_id
+                user_id=request.user_id,
+                user_profile=None
         ):
             full_response += chunk
 

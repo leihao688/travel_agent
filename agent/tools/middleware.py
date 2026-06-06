@@ -32,6 +32,28 @@ async def monitor_tool_call(
 
         # 🔥 核心修改：使用 await 调用处理器
         result = await handler(request)
+        
+        # 详细调试信息
+        logger.info(f"[{agent_name}] 工具返回类型: {type(result).__name__}")
+        logger.info(f"[{agent_name}] 工具返回结果: {result}")
+        
+        # 检查并提取工具返回内容中的 JSON 字符串
+        if hasattr(result, 'content'):
+            logger.info(f"[{agent_name}] result.content 类型: {type(result.content)}")
+            logger.info(f"[{agent_name}] result.content 值: {result.content}")
+            # 尝试提取 TextContent 中的文本内容
+            content = result.content
+            if isinstance(content, list) and len(content) > 0:
+                logger.info(f"[{agent_name}] content[0] 类型: {type(content[0])}")
+                if hasattr(content[0], 'text'):
+                    text_content = content[0].text
+                    logger.info(f"[{agent_name}] 提取的文本内容: {text_content}")
+                    # 检查是否是有效的 JSON
+                    if text_content and (text_content.startswith('[') or text_content.startswith('{')):
+                        logger.info(f"[{agent_name}] 工具 {tool_name} 执行成功，返回 JSON: {text_content[:100]}...")
+                    else:
+                        logger.info(f"[{agent_name}] 工具 {tool_name} 执行成功，返回: {text_content[:100]}...")
+        
         logger.info(f"[{agent_name}] 工具 {tool_name} 执行成功")
         return result
     except Exception as e:

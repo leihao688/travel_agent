@@ -1,9 +1,9 @@
 from agent.tools.agent_tools import mcp
 if __name__ == '__main__':
-    # 🔥 最简单、兼容所有版本的写法
+    # 启动本地 MCP 服务器
     mcp.run(
         transport="http",
         host="0.0.0.0",
-        port=8080,
+        port=8081,
         path="/mcp"
     )

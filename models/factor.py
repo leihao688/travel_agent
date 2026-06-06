@@ -1,14 +1,10 @@
-from langchain_community.chat_models import ChatTongyi
+from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
-from openai.types import ChatModel, EmbeddingModel
-from typing import Optional, Union
+from typing import Optional
 from abc import ABC, abstractmethod
-from config import Settings
 from utils.config_load import rag_config
-
-settings = Settings()
 
 
 class BaseFactoryModel(ABC):
@@ -24,7 +20,13 @@ class EmbeddingModelFactory(BaseFactoryModel):
 
 class ChatModelFactory(BaseFactoryModel):
     def generate(self) -> Optional[Embeddings | BaseChatModel]:
-        return ChatTongyi(model=rag_config['chat_model_name'])
+        # 🔥 使用 OpenAI 兼容接口调用 DashScope，支持 qwen3.6-plus 多模态模型
+        return ChatOpenAI(
+            model=rag_config['chat_model_name'],
+            openai_api_key=rag_config.get('dashscope_api_key', ''),
+            openai_api_base='https://dashscope.aliyuncs.com/compatible-mode/v1',
+            streaming=True,
+        )
 
 
 # 🔥 修改：提供工厂函数，每次调用返回新实例

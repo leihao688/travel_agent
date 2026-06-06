@@ -10,6 +10,7 @@ load_dotenv()
 MCP_URL = os.getenv("MCP_SERVER_URL")
 print(f"🔗 正在连接: {MCP_URL}\n")
 
+
 async def main():
     # 使用 streamable_http_client 连接
     async with streamable_http_client(MCP_URL) as (read, write, _):
@@ -27,7 +28,7 @@ async def main():
             for t in tools.tools[:3]:  # 只显示前 3 个
                 print(f"   - {t.name}")
             if len(tools.tools) > 3:
-                print(f"   ... 还有 {len(tools.tools)-3} 个工具")
+                print(f"   ... 还有 {len(tools.tools) - 3} 个工具")
 
             print("\n" + "=" * 60)
             print("🌤️  测试天气查询 (福州):")
@@ -63,6 +64,7 @@ async def main():
                 print("⚠️  请求超时（云端可能限流）")
             except Exception as e:
                 print(f"❌ 调用失败: {str(e)[:200]}")
+
 
 if __name__ == "__main__":
     try:
